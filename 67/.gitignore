@@ -9,6 +9,7 @@ venv/
 # Environment files
 .env
 .env.*
+!.env.example
 
 # SQLite db files or local database
 *.db
