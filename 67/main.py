@@ -50,6 +50,8 @@ async def on_ready():
         logger.exception("Failed to sync commands: %s", exc)
 
     await set_bot_status()
+    # Start background delivery task
+    bot.loop.create_task(deliver_purchases_loop())
 
 
 @bot.event
@@ -109,6 +111,44 @@ async def main():
         logger.info("Bot shutting down...")
     except Exception as exc:
         logger.exception("Fatal error: %s", exc)
+
+
+async def deliver_purchases_loop():
+    """Background loop that delivers completed purchases via DM."""
+    await bot.wait_until_ready()
+    from database import db as _db
+    while not bot.is_closed():
+        try:
+            pending = await _db.fetch_pending_deliveries()
+            for p in pending:
+                try:
+                    user_id = p['user_id']
+                    content = p['delivery_content'] or 'Delivery content is empty.'
+                    product_name = p['name'] or 'Product'
+                    user = await bot.fetch_user(user_id)
+                    dm_text = f"Thank you for your purchase of {product_name}!\n\n{content}\n\nIf you have issues, contact support."
+                    try:
+                        await user.send(dm_text)
+                        await _db.mark_purchase_delivered(p['id'])
+                        await _db.increment_product_purchase_count(p['product_id'])
+                        # Log delivery
+                        if Config.LOGS_CHANNEL_ID:
+                            ch = bot.get_channel(Config.LOGS_CHANNEL_ID) or await bot.fetch_channel(Config.LOGS_CHANNEL_ID)
+                            if ch:
+                                await ch.send(f"Delivered product {product_name} to <@{user_id}> (purchase id {p['id']})")
+                    except discord.Forbidden:
+                        # Can't DM user; notify them in-channel if possible (ephemeral not possible here)
+                        if Config.LOGS_CHANNEL_ID:
+                            ch = bot.get_channel(Config.LOGS_CHANNEL_ID) or await bot.fetch_channel(Config.LOGS_CHANNEL_ID)
+                            if ch:
+                                await ch.send(f"Could not DM <@{user_id}> for purchase {p['id']}. DMs disabled.")
+                except Exception:
+                    logger.exception("Error delivering purchase %s", p['id'])
+
+        except Exception:
+            logger.exception("Error in deliver_purchases_loop")
+
+        await asyncio.sleep(30)
 
 
 if __name__ == "__main__":

@@ -173,6 +173,73 @@ class Database:
                 # If partners table doesn't exist yet or migration fails, skip (table was created above with column)
                 pass
             logger.info("Database tables created successfully")
+
+            # Products table
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS products (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    description TEXT,
+                    price REAL DEFAULT 0,
+                    stock INTEGER DEFAULT -1,
+                    stripe_url TEXT,
+                    robux_url TEXT,
+                    delivery_content TEXT,
+                    image_url TEXT,
+                    thumbnail_url TEXT,
+                    forum_channel_ids TEXT,
+                    message_ids TEXT,
+                    creator_id INTEGER,
+                    tags TEXT,
+                    category TEXT,
+                    purchase_count INTEGER DEFAULT 0,
+                    created_at TIMESTAMP
+                )
+            ''')
+
+            # Purchases table
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS purchases (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    product_id INTEGER,
+                    user_id INTEGER,
+                    payment_method TEXT,
+                    transaction_id TEXT,
+                    status TEXT DEFAULT 'pending',
+                    created_at TIMESTAMP,
+                    delivered_at TIMESTAMP,
+                    FOREIGN KEY(product_id) REFERENCES products(id)
+                )
+            ''')
+
+            # Robux verification queue
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS robux_verifications (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    product_id INTEGER,
+                    user_id INTEGER,
+                    roblox_url TEXT,
+                    reported_price INTEGER,
+                    status TEXT DEFAULT 'pending',
+                    created_at TIMESTAMP,
+                    resolved_by INTEGER,
+                    resolved_at TIMESTAMP,
+                    notes TEXT,
+                    FOREIGN KEY(product_id) REFERENCES products(id)
+                )
+            ''')
+            await db.commit()
+            # Migration: add stock column if missing
+            try:
+                async with db.execute("PRAGMA table_info(products)") as cursor:
+                    rows = await cursor.fetchall()
+                    cols = [r[1] for r in rows]
+                if 'stock' not in cols:
+                    await db.execute("ALTER TABLE products ADD COLUMN stock INTEGER DEFAULT -1")
+                    await db.commit()
+                    logger.info('Migrated products table: added stock column')
+            except Exception:
+                pass
     
     async def add_giveaway(self, message_id: int, channel_id: int, host_id: int, 
                            prize: str, duration_hours: float, winner_count: int = 1):
@@ -271,6 +338,139 @@ class Database:
             else:
                 async with db.execute(query) as cursor:
                     return await cursor.fetchall()
+
+    # Product helpers
+    async def create_product(
+        self,
+        name: str,
+        description: str = "",
+        price: float = 0.0,
+        stripe_url: str | None = None,
+        robux_url: str | None = None,
+        delivery_content: str | None = None,
+        image_url: str | None = None,
+        thumbnail_url: str | None = None,
+        forum_channel_ids: str | None = None,
+        message_ids: str | None = None,
+        creator_id: int | None = None,
+        tags: str | None = None,
+        category: str | None = None,
+        stock: int | None = None,
+    ) -> int:
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute('''
+                INSERT INTO products
+                (name, description, price, stripe_url, robux_url, delivery_content, image_url, thumbnail_url,
+                 forum_channel_ids, message_ids, creator_id, tags, category, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                name, description, price, stripe_url, robux_url, delivery_content, image_url, thumbnail_url,
+                forum_channel_ids or '', message_ids or '', creator_id, tags or '', category or '', datetime.utcnow()
+            ))
+            await db.commit()
+            return cursor.lastrowid
+
+    async def fetch_product_by_id(self, product_id: int):
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute('SELECT * FROM products WHERE id = ?', (product_id,)) as cursor:
+                return await cursor.fetchone()
+
+    async def fetch_all_products(self):
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute('SELECT * FROM products') as cursor:
+                return await cursor.fetchall()
+
+    async def update_product_message_ids(self, product_id: int, message_ids: str):
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('UPDATE products SET message_ids = ? WHERE id = ?', (message_ids, product_id))
+            await db.commit()
+
+    async def update_product(self, product_id: int, **fields):
+        if not fields:
+            return
+        cols = []
+        params = []
+        for k, v in fields.items():
+            cols.append(f"{k} = ?")
+            params.append(v)
+        params.append(product_id)
+        q = f"UPDATE products SET {', '.join(cols)} WHERE id = ?"
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(q, params)
+            await db.commit()
+
+    async def delete_product(self, product_id: int):
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('DELETE FROM products WHERE id = ?', (product_id,))
+            await db.execute('DELETE FROM purchases WHERE product_id = ?', (product_id,))
+            await db.execute('DELETE FROM robux_verifications WHERE product_id = ?', (product_id,))
+            await db.commit()
+
+    async def fetch_pending_robux_verifications(self):
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("SELECT * FROM robux_verifications WHERE status = 'pending'") as cursor:
+                return await cursor.fetchall()
+
+    async def resolve_robux_verification(self, verification_id: int, approved: bool, resolver_id: int, notes: str | None = None):
+        async with aiosqlite.connect(self.db_path) as db:
+            status = 'approved' if approved else 'rejected'
+            await db.execute('UPDATE robux_verifications SET status = ?, resolved_by = ?, resolved_at = ?, notes = ? WHERE id = ?', (status, resolver_id, datetime.utcnow(), notes or '', verification_id))
+            await db.commit()
+            if approved:
+                # create purchase record for the product/user
+                async with db.execute('SELECT product_id, user_id FROM robux_verifications WHERE id = ?', (verification_id,)) as cursor:
+                    row = await cursor.fetchone()
+                    if row:
+                        await db.execute('INSERT INTO purchases (product_id, user_id, payment_method, status, created_at) VALUES (?, ?, ?, ?, ?)', (row[0], row[1], 'robux', 'completed', datetime.utcnow()))
+                        await db.commit()
+
+    async def add_purchase(self, product_id: int, user_id: int, payment_method: str, transaction_id: str | None = None, status: str = 'pending'):
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('''
+                INSERT INTO purchases (product_id, user_id, payment_method, transaction_id, status, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (product_id, user_id, payment_method, transaction_id, status, datetime.utcnow()))
+            await db.commit()
+
+    async def mark_purchase_completed(self, transaction_id: str, metadata: dict | None = None):
+        async with aiosqlite.connect(self.db_path) as db:
+            # Try to find by transaction_id
+            await db.execute('UPDATE purchases SET status = ?, transaction_id = ? WHERE transaction_id = ? OR (transaction_id IS NULL AND ? IS NOT NULL AND ? = ?)',
+                             ('completed', transaction_id, transaction_id, transaction_id, transaction_id, transaction_id))
+            await db.commit()
+
+    async def fetch_pending_deliveries(self):
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("SELECT p.*, pr.delivery_content, pr.name FROM purchases p JOIN products pr ON p.product_id = pr.id WHERE p.status = 'completed' AND p.delivered_at IS NULL") as cursor:
+                return await cursor.fetchall()
+
+    async def mark_purchase_delivered(self, purchase_id: int):
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('UPDATE purchases SET delivered_at = ?, status = ? WHERE id = ?', (datetime.utcnow(), 'delivered', purchase_id))
+            await db.commit()
+
+    async def mark_purchase_delivered_by_tx(self, transaction_id: str):
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('UPDATE purchases SET delivered_at = ?, status = ? WHERE transaction_id = ?', (datetime.utcnow(), 'delivered', transaction_id))
+            await db.commit()
+
+    async def increment_product_purchase_count(self, product_id: int):
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('UPDATE products SET purchase_count = purchase_count + 1 WHERE id = ?', (product_id,))
+            await db.commit()
+
+    async def add_robux_verification(self, product_id: int, user_id: int, roblox_url: str | None, reported_price: int | None = None):
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute('''
+                INSERT INTO robux_verifications (product_id, user_id, roblox_url, reported_price, created_at)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (product_id, user_id, roblox_url or '', reported_price or 0, datetime.utcnow()))
+            await db.commit()
+            return cursor.lastrowid
 
 # Create global database instance
 db = Database(_database_path_from_env())

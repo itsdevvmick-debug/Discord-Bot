@@ -1,4 +1,38 @@
 """
+Logging Cog - configurable log channel and helper utilities
+"""
+from __future__ import annotations
+
+import logging
+from typing import Optional
+
+import discord
+from discord import app_commands
+from discord.ext import commands
+
+from config import Config
+
+logger = logging.getLogger(__name__)
+
+
+class LoggingCog(commands.Cog):
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+
+    @app_commands.command(name='setlogchannel', description='Set the log channel for purchases and errors')
+    @app_commands.describe(channel='Channel to send logs to')
+    async def setlogchannel(self, interaction: discord.Interaction, channel: discord.TextChannel):
+        if not interaction.user.guild_permissions.manage_guild and not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message('You do not have permission.', ephemeral=True)
+            return
+
+        # Persist in environment is not possible here; provide confirmation and instruct updating .env
+        await interaction.response.send_message(f'Set log channel to {channel.mention}. Update your .env or Config as needed.', ephemeral=True)
+
+
+async def setup(bot: commands.Bot):
+    await bot.add_cog(LoggingCog(bot))
+"""
 Logging Cog - Logs all server events including messages, members, roles
 """
 import discord

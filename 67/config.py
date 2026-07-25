@@ -53,6 +53,7 @@ class Config:
     TEAM_LEADER_ROLE_ID = _int_env("TEAM_LEADER_ROLE_ID")
     SUPPORT_ROLE_ID = _int_env("SUPPORT_ROLE_ID")
     MANAGEMENT_ROLE_ID = _int_env("MANAGEMENT_ROLE_ID")
+    PRODUCT_MANAGER_ROLE_ID = _int_env("PRODUCT_MANAGER_ROLE_ID")
 
     SUPPORT_TICKET_CHANNEL_ID = _int_env("SUPPORT_TICKET_CHANNEL_ID")
     MARKETING_TICKET_CHANNEL_ID = _int_env("MARKETING_TICKET_CHANNEL_ID")
@@ -83,3 +84,9 @@ class Config:
     GIVEAWAY_EMOJI = os.getenv("GIVEAWAY_EMOJI", "\N{PARTY POPPER}")
 
     BASE_DIR = Path(__file__).resolve().parent
+    # Stripe configuration
+    STRIPE_API_KEY = os.getenv("STRIPE_API_KEY", "").strip()
+    STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "").strip()
+    BASE_URL = os.getenv("BASE_URL", "http://localhost:10000").strip()
+    STRIPE_SUCCESS_URL = os.getenv("STRIPE_SUCCESS_URL", BASE_URL + "/stripe/success").strip()
+    STRIPE_CANCEL_URL = os.getenv("STRIPE_CANCEL_URL", BASE_URL + "/stripe/cancel").strip()

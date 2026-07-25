@@ -17,6 +17,29 @@ import typing
 
 logger = logging.getLogger(__name__)
 
+
+def can_manage_ticket_panel(user, guild, role_id: int | None = None) -> bool:
+    """Return True when the user can manage ticket panel creation or ticket channels."""
+    if not guild or not user:
+        return False
+
+    perms = getattr(user, "guild_permissions", None)
+    if perms and (
+        getattr(perms, "manage_guild", False)
+        or getattr(perms, "administrator", False)
+        or getattr(perms, "manage_channels", False)
+    ):
+        return True
+
+    if role_id:
+        role = discord.utils.get(guild.roles, id=role_id)
+        if role and role in getattr(user, "roles", []):
+            return True
+
+    owner_id = getattr(guild, "owner_id", None)
+    return bool(owner_id and getattr(user, "id", None) == owner_id)
+
+
 # OpenAI is optional; avoid crashing if package is missing
 try:
     import openai
@@ -50,7 +73,7 @@ class TicketTypeSelect(discord.ui.Select):
 
 class TicketTypeView(discord.ui.View):
     def __init__(self):
-        super().__init__()
+        super().__init__(timeout=None)
         self.add_item(TicketTypeSelect())
 
 
@@ -144,6 +167,7 @@ async def create_ticket(interaction: discord.Interaction, ticket_type: str):
     
     # Send initial message with buttons
     view = TicketControlView(ticket_id, ticket_type)
+    interaction.client.add_view(view)
     await channel.send(embed=embed, view=view)
 
     # Welcome message with role mention
@@ -203,7 +227,7 @@ async def create_ticket(interaction: discord.Interaction, ticket_type: str):
 
 class TicketControlView(discord.ui.View):
     def __init__(self, ticket_id: str, ticket_type: str):
-        super().__init__()
+        super().__init__(timeout=None)
         self.ticket_id = ticket_id
         self.ticket_type = ticket_type
     
@@ -240,7 +264,7 @@ class TicketControlView(discord.ui.View):
 
 class MarketingApprovalView(discord.ui.View):
     def __init__(self, ticket_id: str):
-        super().__init__()
+        super().__init__(timeout=None)
         self.ticket_id = ticket_id
 
     @discord.ui.button(label="Accept", style=discord.ButtonStyle.success)
@@ -274,7 +298,7 @@ class MarketingApprovalView(discord.ui.View):
 
 class ProofApprovalView(discord.ui.View):
     def __init__(self, ticket_id: str):
-        super().__init__()
+        super().__init__(timeout=None)
         self.ticket_id = ticket_id
 
     @discord.ui.button(label="Yes", style=discord.ButtonStyle.success)
@@ -576,9 +600,7 @@ class TicketCog(commands.Cog):
     async def panel(self, interaction: discord.Interaction):
         """Create main ticket panel with dropdown menu"""
         
-        # Check if user is CEO (owner has CEO role)
-        ceo_role = discord.utils.get(interaction.guild.roles, id=Config.CEO_ROLE_ID)
-        if not ceo_role or ceo_role not in interaction.user.roles:
+        if not can_manage_ticket_panel(interaction.user, interaction.guild, role_id=Config.CEO_ROLE_ID):
             await interaction.response.send_message("You don't have permission to use this command!", ephemeral=True)
             return
         
@@ -593,6 +615,7 @@ class TicketCog(commands.Cog):
             embed.add_field(name="Management", value="Management related issues")
 
             view = TicketTypeView()
+            interaction.client.add_view(view)
             await interaction.response.send_message(embed=embed, view=view)
             await db.log_event("TICKET", interaction.user.id, "PANEL_CREATED", "Main ticket panel")
         except Exception as e:
